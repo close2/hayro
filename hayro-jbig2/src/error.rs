@@ -118,6 +118,12 @@ pub enum SymbolError {
     InvalidStripDelta,
     /// Too many symbol instances in a text region.
     TooManyInstances,
+    /// More height classes without a symbol than the dictionary defines symbols.
+    EmptyHeightClasses,
+    /// The symbol dictionaries define more symbol pixels than one decode admits.
+    SymbolPixels,
+    /// More zero-length export runs than the dictionary has symbols.
+    EmptyExportRuns,
 }
 
 /// Arithmetic overflow errors.
@@ -241,6 +247,18 @@ impl fmt::Display for SymbolError {
             Self::Invalid => write!(f, "invalid symbol encountered"),
             Self::InvalidStripDelta => write!(f, "strip delta overflow"),
             Self::TooManyInstances => write!(f, "too many symbol instances"),
+            Self::EmptyHeightClasses => write!(
+                f,
+                "more height classes without a symbol than the dictionary defines symbols"
+            ),
+            Self::SymbolPixels => write!(
+                f,
+                "the symbol dictionaries define more than 2^28 symbol pixels"
+            ),
+            Self::EmptyExportRuns => write!(
+                f,
+                "more zero-length export runs than the dictionary has symbols"
+            ),
         }
     }
 }

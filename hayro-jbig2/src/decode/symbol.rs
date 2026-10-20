@@ -24,6 +24,17 @@ use crate::reader::Reader;
 
 const MAX_SYMBOLS: u32 = u16::MAX as u32;
 
+/// The most symbol pixels the symbol dictionaries of one decode may define, summed over every
+/// symbol of every dictionary.
+///
+/// T.88 bounds a symbol only by the 32 bits of SYMWIDTH and HCHEIGHT (Table 15) and a dictionary
+/// only by SDNUMNEWSYMS, so a few hundred bytes of arithmetic-coded data, fed 1-bits past their
+/// end (E.3.4), can define billions of pixels of symbols and spend minutes decoding them. A
+/// symbol's pixels are counted before its bitmap is decoded, whichever of 6.5.8.1, 6.5.8.2 and
+/// 6.5.9 decodes it. 2^28 is a choice, not a derived number: a census of 54 498 embedded streams
+/// found at most 41 843 627 symbol pixels in one decode, so this sits six times above it.
+pub(crate) const MAX_SYMBOL_PIXELS: u64 = 1 << 28;
+
 /// Decode a symbol dictionary segment (7.4.2, 6.5).
 pub(crate) fn decode(
     header: &SymbolDictionaryHeader<'_>,
@@ -31,6 +42,7 @@ pub(crate) fn decode(
     referred_tables: &[HuffmanTable],
     standard_tables: &StandardHuffmanTables,
     input_contexts: Option<&RetainedContexts>,
+    symbol_pixels_left: &core::cell::Cell<u64>,
 ) -> Result<SymbolDictionary> {
     let num_new_symbols = header.num_new_symbols;
 
@@ -73,6 +85,15 @@ pub(crate) fn decode(
         }
     };
 
+    // T.88 6.5.5 step 4 a) ends the loop only once SDNUMNEWSYMS symbols are decoded, and a
+    // height class whose first delta width is OOB decodes none. Past the end of its data the
+    // arithmetic decoder is fed 1-bits for as long as decoding asks (E.3.4), so a dictionary
+    // whose data ends inside this loop can yield empty height classes until HCHEIGHT leaves
+    // its 32 bits (Table 15), or for ever where the delta height is zero. The standard bounds
+    // neither the number of height classes nor the number of empty ones; this bounds the empty
+    // ones by the number of symbols the dictionary defines, which no real stream approaches: a
+    // census of 54 498 embedded streams found no empty height class in any that decodes.
+    let mut empty_height_classes: u32 = 0;
     while ctx.symbols_decoded_count < num_new_symbols {
         let height_class_delta =
             read_height_class_delta(&mut ctx)?.ok_or(SymbolError::UnexpectedOob)?;
@@ -101,6 +122,14 @@ pub(crate) fn decode(
                 .total_width
                 .checked_add(symbol_width)
                 .ok_or(OverflowError::BitmapDimension)?;
+
+            let symbol_pixels = u64::from(symbol_width) * u64::from(ctx.height_class_height);
+            symbol_pixels_left.set(
+                symbol_pixels_left
+                    .get()
+                    .checked_sub(symbol_pixels)
+                    .ok_or(SymbolError::SymbolPixels)?,
+            );
 
             match (ctx.header.flags.use_huffman, ctx.header.flags.use_refagg) {
                 (false, false) => {
@@ -133,6 +162,13 @@ pub(crate) fn decode(
             }
 
             ctx.symbols_decoded_count += 1;
+        }
+
+        if ctx.symbols_decoded_count == ctx.height_class_first_symbol {
+            empty_height_classes += 1;
+            if empty_height_classes > num_new_symbols {
+                bail!(SymbolError::EmptyHeightClasses);
+            }
         }
 
         if ctx.header.flags.use_huffman && !ctx.header.flags.use_refagg {
@@ -681,8 +717,20 @@ fn export_symbols(ctx: &mut SymbolDecodeContext<'_>) -> Result<Vec<Bitmap>> {
     let mut index: u32 = 0;
     let mut should_export = false;
 
+    // 6.5.10 step 5 repeats until EXINDEX reaches the symbol count, and step 3 allows a run of
+    // length 0, which does not advance it. Past the end of the data (E.3.4) a run of zero-length
+    // runs therefore never ends the loop. Only the first run has a use for length 0 — it is how
+    // the first symbol comes to be exported — and the standard bounds neither; this admits as many
+    // zero-length runs as there are symbols and one more, which no real stream approaches.
+    let mut zero_length_runs: u32 = 0;
     while index < total_symbols {
         let run_length = read_run_length()?;
+        if run_length == 0 {
+            zero_length_runs += 1;
+            if zero_length_runs > total_symbols.saturating_add(1) {
+                bail!(SymbolError::EmptyExportRuns);
+            }
+        }
 
         let end_index = index.checked_add(run_length).ok_or(OverflowError::Index)?;
         if end_index > total_symbols {

@@ -354,6 +354,7 @@ fn decode_segments(
                     &referred_tables,
                     &page_state.standard_tables,
                     retained_contexts,
+                    &page_state.symbol_pixels_left,
                 )?;
                 page_state.store_symbol_dictionary(seg.header.segment_number, dictionary);
             }
@@ -563,6 +564,10 @@ pub(crate) struct PageState {
     pub(crate) huffman_tables: Vec<(u32, HuffmanTable)>,
     /// Standard Huffman tables (`TABLE_A` through `TABLE_O`).
     pub(crate) standard_tables: StandardHuffmanTables,
+    /// How many more symbol pixels this decode's symbol dictionaries may define; see
+    /// `symbol::MAX_SYMBOL_PIXELS`. A `Cell` because the dictionaries decoded so far are
+    /// borrowed from this state while the next one is decoded.
+    pub(crate) symbol_pixels_left: core::cell::Cell<u64>,
 }
 
 impl PageState {
@@ -573,6 +578,7 @@ impl PageState {
         self.pattern_dictionaries.clear();
         self.symbol_dictionaries.clear();
         self.huffman_tables.clear();
+        self.symbol_pixels_left.set(symbol::MAX_SYMBOL_PIXELS);
         // Standard tables are lazily built and reused across images.
     }
 
